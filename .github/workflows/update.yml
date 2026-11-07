@@ -35,8 +35,26 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+
+          git add data/leaderboard.json
+
           if ! git diff --cached --quiet; then
             git commit -m "Update Division VII roster"
-            git push
+
+            for attempt in 1 2 3 4 5; do
+              git fetch origin main
+
+              if git rebase origin/main && git push origin HEAD:main; then
+                echo "Roster successfully published"
+                exit 0
+              fi
+
+              git rebase --abort 2>/dev/null || true
+              sleep 5
+            done
+
+            echo "Failed to publish roster after 5 attempts"
+            exit 1
+          else
+            echo "No roster changes to publish"
           fi
