@@ -1,9 +1,9 @@
 
-name: Update Armory Roster
+name: Update Division VII Leaderboard
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,6 @@ concurrency:
 
 jobs:
   update:
-    name: Update Division VII Leaderboard
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -24,67 +23,105 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
           persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
-
-      - name: Synchronize with latest repository
-        run: |
-          git fetch origin main
-          git reset --hard origin/main
-
-      - name: Fetch Armory rosters
+      - name: Fetch Blizzard guild rosters
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
         run: |
           python update_roster.py
 
-      - name: Commit and publish updated roster
+      - name: Validate leaderboard data
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("data/leaderboard.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          characters = data.get("characters", [])
+          guilds = {
+              "rp-horde",
+              "rp-alliance",
+              "pvp-horde"
+          }
+
+          if len(characters) < 60:
+              raise SystemExit(
+                  "Roster unexpectedly small; refusing to publish."
+              )
+
+          found = {c.get("guildId") for c in characters}
+
+          if not guilds.issubset(found):
+              raise SystemExit(
+                  "Missing one or more guilds; refusing to publish."
+              )
+
+          for c in characters:
+              if not c.get("name"):
+                  raise SystemExit("Character missing name")
+
+              if not isinstance(c.get("level"), int):
+                  raise SystemExit("Invalid character level")
+
+          print("Validation passed")
+          print("Characters:", len(characters))
+
+          for guild in sorted(guilds):
+              count = sum(
+                  c["guildId"] == guild
+                  for c in characters
+              )
+              print(guild, count)
+
+          if data.get("errors"):
+              print("Warnings:", data["errors"])
+          PY
+
+      - name: Commit updated leaderboard
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [ ! -f data/leaderboard.json ]; then
-            echo "ERROR: data/leaderboard.json was not created."
-            exit 1
+          git add data/leaderboard.json
+
+          if git diff --cached --quiet; then
+            echo "No roster changes to commit."
+            exit 0
           fi
 
-          cp data/leaderboard.json /tmp/division-vii-leaderboard.json
+          git commit -m "Update Division VII leaderboard"
 
+          # Retry if another commit reached main first.
           for attempt in 1 2 3 4 5; do
-            echo "Publish attempt $attempt of 5"
-
             git fetch origin main
-            git reset --hard origin/main
 
-            cp /tmp/division-vii-leaderboard.json data/leaderboard.json
-            git add data/leaderboard.json
-
-            if git diff --cached --quiet; then
-              echo "No changes to publish."
-              exit 0
+            if git rebase origin/main; then
+              if git push origin HEAD:main; then
+                echo "Leaderboard successfully published."
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+              echo "Rebase conflict; stopping safely."
+              exit 1
             fi
 
-            git commit -m "Update Division VII roster"
-
-            if git push origin HEAD:main; then
-              echo "Roster successfully published."
-              exit 0
-            fi
-
-            echo "Push rejected. Retrying in 5 seconds..."
-            sleep 5
+            echo "Push attempt $attempt failed; retrying."
+            sleep $((attempt * 3))
           done
 
-          echo "ERROR: Unable to publish roster after 5 attempts."
+          echo "Unable to publish after retries."
           exit 1
