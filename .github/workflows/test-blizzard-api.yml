@@ -1,0 +1,141 @@
+
+name: Test Blizzard Forever API
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Test Blizzard authentication and guild API
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import base64
+          import urllib.request
+          import urllib.parse
+          import urllib.error
+
+          client_id = os.environ.get("BLIZZARD_CLIENT_ID")
+          client_secret = os.environ.get("BLIZZARD_CLIENT_SECRET")
+
+          if not client_id or not client_secret:
+              raise SystemExit("Missing Blizzard GitHub Secrets")
+
+          credentials = base64.b64encode(
+              f"{client_id}:{client_secret}".encode()
+          ).decode()
+
+          request = urllib.request.Request(
+              "https://oauth.battle.net/token",
+              data=b"grant_type=client_credentials",
+              headers={
+                  "Authorization": "Basic " + credentials,
+                  "Content-Type": "application/x-www-form-urlencoded"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=25) as response:
+                  token = json.load(response)["access_token"]
+          except urllib.error.HTTPError as error:
+              print("OAuth failed: HTTP", error.code)
+              raise SystemExit(1)
+
+          print("SUCCESS: Blizzard authentication works")
+
+          endpoints = [
+              (
+                  "RP-PvP Horde",
+                  "/data/wow/guild/division-vii/roster"
+              ),
+              (
+                  "RP-PvP Alliance",
+                  "/data/wow/guild/divisionvii-imperium/roster"
+              ),
+              (
+                  "PvP Horde",
+                  "/data/wow/guild/divisionvii/roster"
+              ),
+              (
+                  "Ge Nx character",
+                  "/profile/wow/character/ge-nx"
+              )
+          ]
+
+          for label, path in endpoints:
+              url = (
+                  "https://us.api.blizzard.com"
+                  + path
+                  + "?namespace=profile-forever-us&locale=en_US"
+              )
+
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Authorization": "Bearer " + token,
+                      "Accept": "application/json"
+                  }
+              )
+
+              print("\nTEST:", label)
+
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as response:
+                      data = json.load(response)
+
+                  print("HTTP: 200")
+                  print("Response fields:", list(data.keys()))
+
+                  if isinstance(data.get("members"), list):
+                      members = data["members"]
+                      print("Guild members:", len(members))
+
+                      if members:
+                          sample = members[0]
+                          print(
+                              "Sample member fields:",
+                              list(sample.keys())
+                          )
+                          character = sample.get("character", {})
+                          if isinstance(character, dict):
+                              print(
+                                  "Character fields:",
+                                  list(character.keys())
+                              )
+
+                  if "level" in data:
+                      print("Character level:", data["level"])
+
+              except urllib.error.HTTPError as error:
+                  print("HTTP:", error.code)
+                  try:
+                      body = json.loads(error.read())
+                      print(
+                          "Error detail:",
+                          str(body.get("detail", "Unavailable"))[:200]
+                      )
+                  except Exception:
+                      pass
+
+              except Exception as error:
+                  print(
+                      "Request failed:",
+                      type(error).__name__,
+                      str(error)[:200]
+                  )
+
+          print("\nAPI diagnostic completed")
+          PY
